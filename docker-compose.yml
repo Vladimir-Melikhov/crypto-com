@@ -1,3 +1,14 @@
+x-app: &app
+  build: .
+  image: deribit-prices-app:latest
+  env_file: .env
+  # Внутри сети compose БД и Redis доступны по именам сервисов
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+
 services:
   db:
     image: postgres:16-alpine
@@ -21,6 +32,46 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  api:
+    <<: *app
+    command: >
+      sh -c "alembic upgrade head
+      && exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *app
+    command: celery -A app.worker:celery_app worker --loglevel=INFO --concurrency=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      # api применяет миграции при старте
+      api:
+        condition: service_healthy
+
+  beat:
+    <<: *app
+    command: >
+      celery -A app.worker:celery_app beat --loglevel=INFO
+      --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:
